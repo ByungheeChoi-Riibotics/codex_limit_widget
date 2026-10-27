@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import signal
 import subprocess
 import tempfile
@@ -42,6 +43,8 @@ elif mode in ("auth", "error"):
     send({"id": 2, "error": "authentication required" if mode == "auth" else "service unavailable"})
 elif mode == "timeout":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+elif mode.startswith("{"):
+    send({"id": 2, "result": json.loads(mode)})
 else:
     send({"id": 17, "result": {"wrong": True}})
     send({"id": 2, "result": {"rateLimits": {"primary": {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 1793322975}}}})
@@ -111,6 +114,9 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(app, "CODEX", str(cli)).start()
         patch.dict(os.environ, TEST_MODE_FILE=str(self.mode)).start()
+        patch.dict(os.environ, XDG_STATE_HOME=str(Path(self.tmp.name, "state"))).start()
+        self.notifications = []
+        patch.object(app, "send_expiry_notification", self.notifications.append, create=True).start()
         self.children = []
         real_popen = subprocess.Popen
         def launch(*args, **kwargs):
@@ -150,6 +156,313 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.children[-1].returncode, -signal.SIGKILL)
         self.assert_reaped()
 
+    def settle(self, widget):
+        deadline = time.monotonic() + 5
+        while (widget.busy or getattr(widget, "notifying", False)) and time.monotonic() < deadline:
+            app.GLib.MainContext.default().iteration(True)
+        self.assertFalse(widget.busy)
+        self.assertFalse(widget.notifying)
+
+    def labels(self, widget):
+        return [row.get_label() for row in widget.indicator.get_menu().get_children() if isinstance(row, app.Gtk.MenuItem)]
+
+    def start_widget(self, result):
+        self.mode.write_text(json.dumps(result))
+        widget = app.Indicator()
+        def cleanup():
+            widget.stop.set()
+            if widget.worker:
+                widget.worker.join()
+            if widget.notification_worker:
+                widget.notification_worker.join()
+            widget.indicator.set_status(app.AyatanaAppIndicator3.IndicatorStatus.PASSIVE)
+        self.addCleanup(cleanup)
+        self.settle(widget)
+        return widget
+
+    def test_menu_shows_credit_balance_and_available_reset_expiries_in_kst(self):
+        result = {"rateLimitsByLimitId": {"codex": {"primary": WEEK, "credits": {"hasCredits": True, "unlimited": False, "balance": "12345.6789000000"}}}, "rateLimitResetCredits": {"availableCount": 3, "credits": [
+            {"status": "available", "expiresAt": 1793322975},
+            {"status": "available", "expiresAt": None},
+            {"status": "redeemed", "expiresAt": 1793322975},
+            {"status": "redeeming", "expiresAt": 1793322975},
+            {"status": "unknown", "expiresAt": 1793322975},
+        ]}}
+        widget = self.start_widget(result)
+        self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 67% · ↻10/30 10:16")
+        self.assertEqual(self.labels(widget)[2:7], ["일반 크레딧 잔액: 12345.6789000000", "사용 가능한 리셋권: 3개", "리셋권 상세: 2/3개 (일부 상세)", "리셋권 1 기한: 2026-10-30 10:16 KST", "리셋권 2 기한: 만료 없음"])
+
+    def use_clock(self, now):
+        self.now = now
+        self.monotonic_offset = 0
+        patch.object(app, "time", SimpleNamespace(time=lambda: self.now, monotonic=lambda: time.monotonic() + self.monotonic_offset)).start()
+
+    def advance(self, seconds, suspended=False):
+        self.now += seconds
+        if not suspended:
+            self.monotonic_offset += seconds
+
+    def reset_result(self, expiries, count=None):
+        return {"rateLimits": {"primary": WEEK}, "rateLimitResetCredits": {"availableCount": len(expiries) if count is None else count, "credits": [{"status": "available", "expiresAt": expiry} for expiry in expiries]}}
+
+    def test_noon_notifies_up_to_72_hours_once_across_render_and_restart(self):
+        self.use_clock(1793069999)
+        result = self.reset_result([1793070000, 1793070001, 1793329200, 1793329201, None])
+        widget = self.start_widget(result)
+        self.assertEqual(self.notifications, [])
+        self.advance(1)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
+        widget.render()
+        widget.refresh()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
+        self.now = 1793069999
+        other = self.start_widget(result)
+        self.advance(1)
+        other.render()
+        self.settle(other)
+        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
+        state_files = [path for path in Path(self.tmp.name, "state").rglob("*") if path.is_file()]
+        self.assertEqual([path.read_text() for path in state_files], ["2026-10-27"])
+
+    def test_notification_failure_recovers_with_fresh_retry_and_persists_only_success(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        attempts = []
+        def notify(expiries):
+            attempts.append(expiries)
+            if len(attempts) == 1:
+                raise RuntimeError("notification unavailable")
+            self.notifications.append(expiries)
+        patch.object(app, "send_expiry_notification", notify).start()
+        self.advance(1)
+        widget.render()
+        self.settle(widget)
+        self.assertIn("리셋권 알림 실패", self.labels(widget))
+        self.assertEqual(self.notifications, [])
+        widget.render()
+        self.assertEqual(len(attempts), 1)
+        self.advance(5)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793329200]])
+        self.assertNotIn("리셋권 알림 실패", self.labels(widget))
+
+    def test_menu_distinguishes_zero_unlimited_missing_partial_and_invalid_credits(self):
+        widget = self.start_widget({"rateLimits": {"credits": {"hasCredits": False, "unlimited": False, "balance": "0"}}, "rateLimitResetCredits": {"availableCount": 0, "credits": []}})
+        cases = [
+            ({"rateLimits": {"credits": {"hasCredits": False, "unlimited": False, "balance": "0"}}, "rateLimitResetCredits": {"availableCount": 0, "credits": []}}, ["일반 크레딧 잔액: 0", "사용 가능한 리셋권: 0개", "리셋권 상세: 없음"]),
+            ({"rateLimits": {"credits": {"unlimited": True, "balance": None}}, "rateLimitResetCredits": None}, ["일반 크레딧 잔액: 무제한", "사용 가능한 리셋권: 미제공", "리셋권 상세: 미제공"]),
+            ({"rateLimits": {"credits": {"balance": None}}, "rateLimitResetCredits": {"availableCount": 4, "credits": None}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 미제공"]),
+            ({"rateLimitResetCredits": {"availableCount": None, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 0/미제공개"]),
+            ({"rateLimitResetCredits": {"availableCount": 4, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 0/4개 (일부 상세)"]),
+            ({"rateLimits": {"credits": {"balance": "NaN"}}, "rateLimitResetCredits": {"availableCount": True, "credits": [{"status": "available"}, {"status": "available", "expiresAt": True}, {"status": "available", "expiresAt": "tomorrow"}, {"status": "available", "expiresAt": 10**100}, {"status": "redeemed", "expiresAt": 1793329200}]}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 4/미제공개", "리셋권 1 기한: 미제공", "리셋권 2 기한: 미제공", "리셋권 3 기한: 미제공", "리셋권 4 기한: 미제공"]),
+        ]
+        for result, expected in cases:
+            with self.subTest(result=result):
+                self.mode.write_text(json.dumps(result))
+                widget.refresh()
+                self.settle(widget)
+                self.assertEqual(self.labels(widget)[:len(expected)], expected)
+        self.mode.write_text("error")
+        widget.refresh()
+        self.settle(widget)
+        self.assertIn("일반 크레딧 잔액: 미제공 !", self.labels(widget))
+        self.assertIn("사용 가능한 리셋권: 미제공 !", self.labels(widget))
+        self.mode.write_text(json.dumps(cases[0][0]))
+        widget.refresh()
+        self.settle(widget)
+        self.assertIn("일반 크레딧 잔액: 0", self.labels(widget))
+        self.assertNotIn("일반 크레딧 잔액: 미제공 !", self.labels(widget))
+
+    def test_noon_waits_for_new_query_after_inflight_stale_result(self):
+        self.use_clock(1793069999)
+        started, release = threading.Event(), threading.Event()
+        responses = [self.reset_result([1793329200]), self.reset_result([1793242800])]
+        def read(stop):
+            result = responses.pop(0)
+            if not started.is_set():
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError()
+            return result
+        patch.object(app, "read_rate_limits", read).start()
+        widget = app.Indicator()
+        self.addCleanup(widget.stop.set)
+        self.addCleanup(lambda: widget.indicator.set_status(app.AyatanaAppIndicator3.IndicatorStatus.PASSIVE))
+        self.assertTrue(started.wait(5))
+        self.advance(1)
+        widget.render()
+        self.assertEqual(self.notifications, [])
+        release.set()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793242800]])
+        self.assertIn("리셋권 1 기한: 2026-10-29 12:00 KST", self.labels(widget))
+
+    def test_noon_query_failure_never_notifies_stale_credits_or_later_recovery(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        self.mode.write_text("error")
+        self.advance(1)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+        self.assertIn("사용 가능한 리셋권: 1개 !", self.labels(widget))
+        self.advance(60)
+        self.mode.write_text(json.dumps(self.reset_result([1793329200])))
+        widget.refresh()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+        self.assertIn("사용 가능한 리셋권: 1개", self.labels(widget))
+
+    def test_starting_after_noon_or_suspending_across_noon_never_catches_up(self):
+        self.use_clock(1793070001)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        widget.render()
+        self.assertEqual(self.notifications, [])
+        self.now = 1793156399
+        widget.render()
+        self.advance(2, suspended=True)
+        widget.render()
+        widget.refresh()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+
+    def test_missing_details_unknown_dates_and_unavailable_credits_do_not_notify(self):
+        self.use_clock(1793069999)
+        result = {"rateLimitResetCredits": {"availableCount": 4, "credits": [{"status": "redeemed", "expiresAt": 1793070001}, {"status": "redeeming", "expiresAt": 1793070001}, {"status": "available", "expiresAt": None}, {"status": "available", "expiresAt": True}, {"status": "available"}]}}
+        widget = self.start_widget(result)
+        self.advance(1)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+
+    def test_awake_main_loop_delay_within_noon_minute_still_notifies(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        self.advance(30)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793329200]])
+
+    def test_delivery_success_with_state_write_failure_never_repeats_in_same_run(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        with patch.object(app.os, "fsync", side_effect=OSError("disk full")):
+            self.advance(1)
+            widget.render()
+            self.settle(widget)
+            self.assertEqual(self.notifications, [[1793329200]])
+            self.advance(5)
+            widget.render()
+            self.settle(widget)
+            self.assertEqual(self.notifications, [[1793329200]])
+        self.assertIn("리셋권 알림 기록 실패", self.labels(widget))
+
+    def test_noon_query_completing_after_1201_does_not_notify_late(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793070001, 1793329200, 1793329201]))
+        started, release = threading.Event(), threading.Event()
+        def read(stop):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError()
+            return self.reset_result([1793070001, 1793329200, 1793329201])
+        patch.object(app, "read_rate_limits", read).start()
+        self.advance(1)
+        widget.render()
+        self.assertTrue(started.wait(5))
+        self.advance(61)
+        release.set()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+
+    def test_failed_noon_query_retries_only_fresh_results_within_noon_minute(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        self.mode.write_text("error")
+        self.advance(1)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+        self.mode.write_text(json.dumps(self.reset_result([1793242800])))
+        self.advance(5)
+        widget.render()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793242800]])
+
+    def test_slow_notification_delivery_keeps_gui_responsive(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def notify(expiries):
+            started.set()
+            delivered = release.wait(2)
+            finished.set()
+            if not delivered:
+                raise TimeoutError()
+            self.notifications.append(expiries)
+        patch.object(app, "send_expiry_notification", notify).start()
+        self.addCleanup(release.set)
+        self.advance(1)
+        widget.render()
+        deadline = time.monotonic() + 5
+        while widget.busy and time.monotonic() < deadline:
+            app.GLib.MainContext.default().iteration(True)
+        self.assertTrue(started.wait(5))
+        self.assertFalse(finished.is_set())
+        widget.render()
+        self.assertIn("갱신 완료", self.labels(widget))
+        self.assertFalse(finished.is_set())
+        release.set()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [[1793329200]])
+
+    def test_noon_query_completed_after_suspend_within_minute_does_not_notify(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        started, release = threading.Event(), threading.Event()
+        def read(stop):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError()
+            return self.reset_result([1793329200])
+        patch.object(app, "read_rate_limits", read).start()
+        self.advance(1)
+        widget.render()
+        self.assertTrue(started.wait(5))
+        self.advance(30, suspended=True)
+        release.set()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+
+    def test_suspended_notification_worker_does_not_send_after_gui_resumes_first(self):
+        self.use_clock(1793069999)
+        widget = self.start_widget(self.reset_result([1793329200]))
+        started, release = threading.Event(), threading.Event()
+        real_flock = app.fcntl.flock
+        def lock(file, operation):
+            if operation == app.fcntl.LOCK_EX:
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError()
+            return real_flock(file, operation)
+        patch.object(app.fcntl, "flock", lock).start()
+        self.addCleanup(release.set)
+        self.advance(1)
+        widget.render()
+        deadline = time.monotonic() + 5
+        while widget.busy and time.monotonic() < deadline:
+            app.GLib.MainContext.default().iteration(True)
+        self.assertTrue(started.wait(5))
+        self.advance(30, suspended=True)
+        widget.render()
+        release.set()
+        self.settle(widget)
+        self.assertEqual(self.notifications, [])
+
     def test_gui_keeps_stale_value_and_recovers_after_success(self):
         self.mode.write_text("success")
         widget = app.Indicator()
@@ -179,6 +492,8 @@ class ProcessIntegrationTest(unittest.TestCase):
             widget.stop.set()
             if widget.worker:
                 widget.worker.join()
+            if widget.notification_worker:
+                widget.notification_worker.join()
             widget.indicator.set_status(app.AyatanaAppIndicator3.IndicatorStatus.PASSIVE)
         self.assert_reaped()
 
