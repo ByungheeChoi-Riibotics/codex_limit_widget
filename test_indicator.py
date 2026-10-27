@@ -16,8 +16,8 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("indicator", Path(__file__).with_name("indicator.py"))
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
-RESET = 1793322975
-WEEK = {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": RESET}
+RESET = 1894670175
+WEEK = {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": RESET}
 RESULT = {"rateLimitsByLimitId": {"codex": {"primary": WEEK, "secondary": None}}}
 
 FAKE = '''#!/usr/bin/python3
@@ -47,16 +47,16 @@ elif mode.startswith("{"):
     send({"id": 2, "result": json.loads(mode)})
 else:
     send({"id": 17, "result": {"wrong": True}})
-    send({"id": 2, "result": {"rateLimits": {"primary": {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 1793322975}}}})
+    send({"id": 2, "result": {"rateLimits": {"primary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 1894670175}}}})
 while True:
     signal.pause()
 '''
 
 
 class DisplayTest(unittest.TestCase):
-    def test_used_63_percent_displays_remaining_37_percent(self):
-        windows = app.select_windows({"rateLimits": {"primary": dict(WEEK, usedPercent=63)}})
-        self.assertEqual(app.format_windows(windows, RESET - 1), ("Codex 주간 남음 37% · ↻10/30 10:16", ["주간 남음 37% · 사용 63% · 2026-10-30 10:16 KST", "다음 리셋 기간: 주간"]))
+    def test_used_73_percent_displays_remaining_27_percent(self):
+        windows = app.select_windows({"rateLimits": {"primary": dict(WEEK, usedPercent=73)}})
+        self.assertEqual(app.format_windows(windows, RESET - 1), ("Codex 주간 남음 27% · ↻01/15 10:16", ["주간 남음 27% · 사용 73% · 2030-01-15 10:16 KST", "다음 리셋 기간: 주간"]))
         for used, remaining in ((0, 100), (100, 0), (101, 0)):
             with self.subTest(used=used):
                 windows = app.select_windows({"rateLimits": {"primary": dict(WEEK, usedPercent=used)}})
@@ -65,7 +65,7 @@ class DisplayTest(unittest.TestCase):
                 self.assertIn(f"주간 남음 {remaining}% · 사용 {used}%", details[0])
 
     def test_returned_periods_and_codex_bucket_are_used(self):
-        expected = [{"name": "주간", "used": 33, "reset": RESET}]
+        expected = [{"name": "주간", "used": 20, "reset": RESET}]
         self.assertEqual(app.select_windows(RESULT), expected)
         self.assertEqual(app.select_windows({"rateLimits": {"primary": WEEK}}), expected)
         self.assertEqual(app.select_windows({"rateLimits": {"limitId": "other", "primary": WEEK}}), [])
@@ -79,7 +79,7 @@ class DisplayTest(unittest.TestCase):
             self.assertEqual(app.select_windows(result), [])
 
     def test_malformed_values_are_rejected(self):
-        for field, values in (("usedPercent", [True, -1, "33", float("nan"), float("inf")]), ("windowDurationMins", [True, 0, -1, 3.5, "300"]), ("resetsAt", [True, "tomorrow", float("nan"), float("inf"), 1e100])):
+        for field, values in (("usedPercent", [True, -1, "20", float("nan"), float("inf")]), ("windowDurationMins", [True, 0, -1, 3.5, "300"]), ("resetsAt", [True, "tomorrow", float("nan"), float("inf"), 1e100])):
             for value in values:
                 with self.subTest(field=field, value=value):
                     with self.assertRaises((ValueError, OverflowError, OSError)):
@@ -89,14 +89,14 @@ class DisplayTest(unittest.TestCase):
 
     def test_kst_nearest_future_and_elapsed_reset_keep_usage(self):
         weekly = app.select_windows(RESULT)
-        self.assertEqual(app.format_windows(weekly, RESET - 1), ("Codex 주간 남음 67% · ↻10/30 10:16", ["주간 남음 67% · 사용 33% · 2026-10-30 10:16 KST", "다음 리셋 기간: 주간"]))
-        self.assertEqual(app.format_windows(weekly, RESET), ("Codex 주간 남음 67% · 리셋 확인 중", ["주간 남음 67% · 사용 33% · 2026-10-30 10:16 KST (리셋 확인 중)"]))
+        self.assertEqual(app.format_windows(weekly, RESET - 1), ("Codex 주간 남음 80% · ↻01/15 10:16", ["주간 남음 80% · 사용 20% · 2030-01-15 10:16 KST", "다음 리셋 기간: 주간"]))
+        self.assertEqual(app.format_windows(weekly, RESET), ("Codex 주간 남음 80% · 리셋 확인 중", ["주간 남음 80% · 사용 20% · 2030-01-15 10:16 KST (리셋 확인 중)"]))
         both = [{"name": "5h", "used": 18, "reset": RESET - 3600}] + weekly
         label, details = app.format_windows(both, RESET - 7200)
-        self.assertEqual(label, "Codex 5h 남음 82% · 주간 남음 67% · ↻10/30 09:16")
+        self.assertEqual(label, "Codex 5h 남음 82% · 주간 남음 80% · ↻01/15 09:16")
         self.assertEqual(details[-1], "다음 리셋 기간: 5h")
         label, details = app.format_windows(both, RESET - 1800)
-        self.assertTrue(label.endswith("↻10/30 10:16"))
+        self.assertTrue(label.endswith("↻01/15 10:16"))
         self.assertIn("리셋 확인 중", details[0])
         self.assertEqual(details[-1], "다음 리셋 기간: 주간")
         self.assertEqual(app.format_windows([], RESET), ("Codex 한도 정보 없음", []))
@@ -136,7 +136,7 @@ class ProcessIntegrationTest(unittest.TestCase):
     def test_jsonl_success_ignores_unrelated_ids_and_reaps_child(self):
         self.mode.write_text("success")
         result = app.read_rate_limits(threading.Event())
-        self.assertEqual(app.select_windows(result), [{"name": "주간", "used": 33, "reset": RESET}])
+        self.assertEqual(app.select_windows(result), [{"name": "주간", "used": 20, "reset": RESET}])
         self.assert_reaped()
 
     def test_protocol_errors_eof_and_malformed_json_reap_children(self):
@@ -182,15 +182,15 @@ class ProcessIntegrationTest(unittest.TestCase):
 
     def test_menu_shows_credit_balance_and_available_reset_expiries_in_kst(self):
         result = {"rateLimitsByLimitId": {"codex": {"primary": WEEK, "credits": {"hasCredits": True, "unlimited": False, "balance": "12345.6789000000"}}}, "rateLimitResetCredits": {"availableCount": 3, "credits": [
-            {"status": "available", "expiresAt": 1793322975},
+            {"status": "available", "expiresAt": 1894670175},
             {"status": "available", "expiresAt": None},
-            {"status": "redeemed", "expiresAt": 1793322975},
-            {"status": "redeeming", "expiresAt": 1793322975},
-            {"status": "unknown", "expiresAt": 1793322975},
+            {"status": "redeemed", "expiresAt": 1894670175},
+            {"status": "redeeming", "expiresAt": 1894670175},
+            {"status": "unknown", "expiresAt": 1894670175},
         ]}}
         widget = self.start_widget(result)
-        self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 67% · ↻10/30 10:16")
-        self.assertEqual(self.labels(widget)[2:7], ["일반 크레딧 잔액: 12345.6789000000", "사용 가능한 리셋권: 3개", "리셋권 상세: 2/3개 (일부 상세)", "리셋권 1 기한: 2026-10-30 10:16 KST", "리셋권 2 기한: 만료 없음"])
+        self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 80% · ↻01/15 10:16")
+        self.assertEqual(self.labels(widget)[2:7], ["일반 크레딧 잔액: 12345.6789000000", "사용 가능한 리셋권: 3개", "리셋권 상세: 2/3개 (일부 상세)", "리셋권 1 기한: 2030-01-15 10:16 KST", "리셋권 2 기한: 만료 없음"])
 
     def use_clock(self, now):
         self.now = now
@@ -206,30 +206,30 @@ class ProcessIntegrationTest(unittest.TestCase):
         return {"rateLimits": {"primary": WEEK}, "rateLimitResetCredits": {"availableCount": len(expiries) if count is None else count, "credits": [{"status": "available", "expiresAt": expiry} for expiry in expiries]}}
 
     def test_noon_notifies_up_to_72_hours_once_across_render_and_restart(self):
-        self.use_clock(1793069999)
-        result = self.reset_result([1793070000, 1793070001, 1793329200, 1793329201, None])
+        self.use_clock(1894417199)
+        result = self.reset_result([1894417200, 1894417201, 1894676400, 1894676401, None])
         widget = self.start_widget(result)
         self.assertEqual(self.notifications, [])
         self.advance(1)
         widget.render()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
+        self.assertEqual(self.notifications, [[1894417201, 1894676400]])
         widget.render()
         widget.refresh()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
-        self.now = 1793069999
+        self.assertEqual(self.notifications, [[1894417201, 1894676400]])
+        self.now = 1894417199
         other = self.start_widget(result)
         self.advance(1)
         other.render()
         self.settle(other)
-        self.assertEqual(self.notifications, [[1793070001, 1793329200]])
+        self.assertEqual(self.notifications, [[1894417201, 1894676400]])
         state_files = [path for path in Path(self.tmp.name, "state").rglob("*") if path.is_file()]
-        self.assertEqual([path.read_text() for path in state_files], ["2026-10-27"])
+        self.assertEqual([path.read_text() for path in state_files], ["2030-01-12"])
 
     def test_notification_failure_recovers_with_fresh_retry_and_persists_only_success(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         attempts = []
         def notify(expiries):
             attempts.append(expiries)
@@ -247,7 +247,7 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.advance(5)
         widget.render()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793329200]])
+        self.assertEqual(self.notifications, [[1894676400]])
         self.assertNotIn("리셋권 알림 실패", self.labels(widget))
 
     def test_menu_distinguishes_zero_unlimited_missing_partial_and_invalid_credits(self):
@@ -258,7 +258,7 @@ class ProcessIntegrationTest(unittest.TestCase):
             ({"rateLimits": {"credits": {"balance": None}}, "rateLimitResetCredits": {"availableCount": 4, "credits": None}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 미제공"]),
             ({"rateLimitResetCredits": {"availableCount": None, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 0/미제공개"]),
             ({"rateLimitResetCredits": {"availableCount": 4, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 0/4개 (일부 상세)"]),
-            ({"rateLimits": {"credits": {"balance": "NaN"}}, "rateLimitResetCredits": {"availableCount": True, "credits": [{"status": "available"}, {"status": "available", "expiresAt": True}, {"status": "available", "expiresAt": "tomorrow"}, {"status": "available", "expiresAt": 10**100}, {"status": "redeemed", "expiresAt": 1793329200}]}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 4/미제공개", "리셋권 1 기한: 미제공", "리셋권 2 기한: 미제공", "리셋권 3 기한: 미제공", "리셋권 4 기한: 미제공"]),
+            ({"rateLimits": {"credits": {"balance": "NaN"}}, "rateLimitResetCredits": {"availableCount": True, "credits": [{"status": "available"}, {"status": "available", "expiresAt": True}, {"status": "available", "expiresAt": "tomorrow"}, {"status": "available", "expiresAt": 10**100}, {"status": "redeemed", "expiresAt": 1894676400}]}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 4/미제공개", "리셋권 1 기한: 미제공", "리셋권 2 기한: 미제공", "리셋권 3 기한: 미제공", "리셋권 4 기한: 미제공"]),
         ]
         for result, expected in cases:
             with self.subTest(result=result):
@@ -278,9 +278,9 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertNotIn("일반 크레딧 잔액: 미제공 !", self.labels(widget))
 
     def test_noon_waits_for_new_query_after_inflight_stale_result(self):
-        self.use_clock(1793069999)
+        self.use_clock(1894417199)
         started, release = threading.Event(), threading.Event()
-        responses = [self.reset_result([1793329200]), self.reset_result([1793242800])]
+        responses = [self.reset_result([1894676400]), self.reset_result([1894590000])]
         def read(stop):
             result = responses.pop(0)
             if not started.is_set():
@@ -298,12 +298,12 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
         release.set()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793242800]])
-        self.assertIn("리셋권 1 기한: 2026-10-29 12:00 KST", self.labels(widget))
+        self.assertEqual(self.notifications, [[1894590000]])
+        self.assertIn("리셋권 1 기한: 2030-01-14 12:00 KST", self.labels(widget))
 
     def test_noon_query_failure_never_notifies_stale_credits_or_later_recovery(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         self.mode.write_text("error")
         self.advance(1)
         widget.render()
@@ -311,18 +311,18 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
         self.assertIn("사용 가능한 리셋권: 1개 !", self.labels(widget))
         self.advance(60)
-        self.mode.write_text(json.dumps(self.reset_result([1793329200])))
+        self.mode.write_text(json.dumps(self.reset_result([1894676400])))
         widget.refresh()
         self.settle(widget)
         self.assertEqual(self.notifications, [])
         self.assertIn("사용 가능한 리셋권: 1개", self.labels(widget))
 
     def test_starting_after_noon_or_suspending_across_noon_never_catches_up(self):
-        self.use_clock(1793070001)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417201)
+        widget = self.start_widget(self.reset_result([1894676400]))
         widget.render()
         self.assertEqual(self.notifications, [])
-        self.now = 1793156399
+        self.now = 1894503599
         widget.render()
         self.advance(2, suspended=True)
         widget.render()
@@ -331,8 +331,8 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
 
     def test_missing_details_unknown_dates_and_unavailable_credits_do_not_notify(self):
-        self.use_clock(1793069999)
-        result = {"rateLimitResetCredits": {"availableCount": 4, "credits": [{"status": "redeemed", "expiresAt": 1793070001}, {"status": "redeeming", "expiresAt": 1793070001}, {"status": "available", "expiresAt": None}, {"status": "available", "expiresAt": True}, {"status": "available"}]}}
+        self.use_clock(1894417199)
+        result = {"rateLimitResetCredits": {"availableCount": 4, "credits": [{"status": "redeemed", "expiresAt": 1894417201}, {"status": "redeeming", "expiresAt": 1894417201}, {"status": "available", "expiresAt": None}, {"status": "available", "expiresAt": True}, {"status": "available"}]}}
         widget = self.start_widget(result)
         self.advance(1)
         widget.render()
@@ -340,36 +340,36 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
 
     def test_awake_main_loop_delay_within_noon_minute_still_notifies(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         self.advance(30)
         widget.render()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793329200]])
+        self.assertEqual(self.notifications, [[1894676400]])
 
     def test_delivery_success_with_state_write_failure_never_repeats_in_same_run(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         with patch.object(app.os, "fsync", side_effect=OSError("disk full")):
             self.advance(1)
             widget.render()
             self.settle(widget)
-            self.assertEqual(self.notifications, [[1793329200]])
+            self.assertEqual(self.notifications, [[1894676400]])
             self.advance(5)
             widget.render()
             self.settle(widget)
-            self.assertEqual(self.notifications, [[1793329200]])
+            self.assertEqual(self.notifications, [[1894676400]])
         self.assertIn("리셋권 알림 기록 실패", self.labels(widget))
 
     def test_noon_query_completing_after_1201_does_not_notify_late(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793070001, 1793329200, 1793329201]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894417201, 1894676400, 1894676401]))
         started, release = threading.Event(), threading.Event()
         def read(stop):
             started.set()
             if not release.wait(5):
                 raise TimeoutError()
-            return self.reset_result([1793070001, 1793329200, 1793329201])
+            return self.reset_result([1894417201, 1894676400, 1894676401])
         patch.object(app, "read_rate_limits", read).start()
         self.advance(1)
         widget.render()
@@ -380,22 +380,22 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
 
     def test_failed_noon_query_retries_only_fresh_results_within_noon_minute(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         self.mode.write_text("error")
         self.advance(1)
         widget.render()
         self.settle(widget)
         self.assertEqual(self.notifications, [])
-        self.mode.write_text(json.dumps(self.reset_result([1793242800])))
+        self.mode.write_text(json.dumps(self.reset_result([1894590000])))
         self.advance(5)
         widget.render()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793242800]])
+        self.assertEqual(self.notifications, [[1894590000]])
 
     def test_slow_notification_delivery_keeps_gui_responsive(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         def notify(expiries):
             started.set()
@@ -418,17 +418,17 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertFalse(finished.is_set())
         release.set()
         self.settle(widget)
-        self.assertEqual(self.notifications, [[1793329200]])
+        self.assertEqual(self.notifications, [[1894676400]])
 
     def test_noon_query_completed_after_suspend_within_minute_does_not_notify(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         started, release = threading.Event(), threading.Event()
         def read(stop):
             started.set()
             if not release.wait(5):
                 raise TimeoutError()
-            return self.reset_result([1793329200])
+            return self.reset_result([1894676400])
         patch.object(app, "read_rate_limits", read).start()
         self.advance(1)
         widget.render()
@@ -439,8 +439,8 @@ class ProcessIntegrationTest(unittest.TestCase):
         self.assertEqual(self.notifications, [])
 
     def test_suspended_notification_worker_does_not_send_after_gui_resumes_first(self):
-        self.use_clock(1793069999)
-        widget = self.start_widget(self.reset_result([1793329200]))
+        self.use_clock(1894417199)
+        widget = self.start_widget(self.reset_result([1894676400]))
         started, release = threading.Event(), threading.Event()
         real_flock = app.fcntl.flock
         def lock(file, operation):
@@ -474,7 +474,7 @@ class ProcessIntegrationTest(unittest.TestCase):
         try:
             settled()
             first = widget.last_success
-            self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 67% · ↻10/30 10:16")
+            self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 80% · ↻01/15 10:16")
             self.mode.write_text("error")
             widget.refresh()
             settled()
