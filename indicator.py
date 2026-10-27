@@ -193,7 +193,7 @@ def format_credits(credits):
         details.append(f"리셋권 상세: {len(expiries)}/{total}개" + (" (일부 상세)" if count is not None and len(expiries) < count else ""))
         for index, expiry in enumerate(expiries, 1):
             when = "만료 없음" if expiry is None else ("미제공" if expiry == "unknown" else datetime.fromtimestamp(expiry, KST).strftime("%Y-%m-%d %H:%M KST"))
-            details.append(f"리셋권 {index} 기한: {when}")
+            details.append(f"  ↳ 리셋권 {index} 기한: {when}")
     return details
 
 

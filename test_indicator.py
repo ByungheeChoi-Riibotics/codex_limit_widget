@@ -190,7 +190,7 @@ class ProcessIntegrationTest(unittest.TestCase):
         ]}}
         widget = self.start_widget(result)
         self.assertEqual(widget.indicator.get_label(), "Codex 주간 남음 80% · ↻01/15 10:16")
-        self.assertEqual(self.labels(widget)[2:7], ["일반 크레딧 잔액: 12345.6789000000", "사용 가능한 리셋권: 3개", "리셋권 상세: 2/3개 (일부 상세)", "리셋권 1 기한: 2030-01-15 10:16 KST", "리셋권 2 기한: 만료 없음"])
+        self.assertEqual(self.labels(widget)[2:7], ["일반 크레딧 잔액: 12345.6789000000", "사용 가능한 리셋권: 3개", "리셋권 상세: 2/3개 (일부 상세)", "  ↳ 리셋권 1 기한: 2030-01-15 10:16 KST", "  ↳ 리셋권 2 기한: 만료 없음"])
 
     def use_clock(self, now):
         self.now = now
@@ -258,7 +258,7 @@ class ProcessIntegrationTest(unittest.TestCase):
             ({"rateLimits": {"credits": {"balance": None}}, "rateLimitResetCredits": {"availableCount": 4, "credits": None}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 미제공"]),
             ({"rateLimitResetCredits": {"availableCount": None, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 0/미제공개"]),
             ({"rateLimitResetCredits": {"availableCount": 4, "credits": []}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 4개", "리셋권 상세: 0/4개 (일부 상세)"]),
-            ({"rateLimits": {"credits": {"balance": "NaN"}}, "rateLimitResetCredits": {"availableCount": True, "credits": [{"status": "available"}, {"status": "available", "expiresAt": True}, {"status": "available", "expiresAt": "tomorrow"}, {"status": "available", "expiresAt": 10**100}, {"status": "redeemed", "expiresAt": 1894676400}]}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 4/미제공개", "리셋권 1 기한: 미제공", "리셋권 2 기한: 미제공", "리셋권 3 기한: 미제공", "리셋권 4 기한: 미제공"]),
+            ({"rateLimits": {"credits": {"balance": "NaN"}}, "rateLimitResetCredits": {"availableCount": True, "credits": [{"status": "available"}, {"status": "available", "expiresAt": True}, {"status": "available", "expiresAt": "tomorrow"}, {"status": "available", "expiresAt": 10**100}, {"status": "redeemed", "expiresAt": 1894676400}]}}, ["일반 크레딧 잔액: 미제공", "사용 가능한 리셋권: 미제공", "리셋권 상세: 4/미제공개", "  ↳ 리셋권 1 기한: 미제공", "  ↳ 리셋권 2 기한: 미제공", "  ↳ 리셋권 3 기한: 미제공", "  ↳ 리셋권 4 기한: 미제공"]),
         ]
         for result, expected in cases:
             with self.subTest(result=result):
@@ -299,7 +299,7 @@ class ProcessIntegrationTest(unittest.TestCase):
         release.set()
         self.settle(widget)
         self.assertEqual(self.notifications, [[1894590000]])
-        self.assertIn("리셋권 1 기한: 2030-01-14 12:00 KST", self.labels(widget))
+        self.assertIn("  ↳ 리셋권 1 기한: 2030-01-14 12:00 KST", self.labels(widget))
 
     def test_noon_query_failure_never_notifies_stale_credits_or_later_recovery(self):
         self.use_clock(1894417199)
